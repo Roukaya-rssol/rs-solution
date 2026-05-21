@@ -5,13 +5,11 @@ export const revalidate = 0;
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { prisma } from "@/lib/prisma";
-import { getCurrentUserCompany } from "@/lib/getCurrentUserCompany";
-import { getUserRoles, hasRole } from "@/lib/permissions";
 
 type RouteProps = {
-  params: Promise<{
+  params: {
     id: string;
-  }>;
+  };
 };
 
 export async function PATCH(request: Request, { params }: RouteProps) {
@@ -23,19 +21,6 @@ export async function PATCH(request: Request, { params }: RouteProps) {
       return NextResponse.json({ message: "Non autorisé." }, { status: 401 });
     }
 
-    const userCompany = await getCurrentUserCompany(userCookie.value);
-
-    if (!userCompany) {
-      return NextResponse.json(
-        { message: "Aucune entreprise active." },
-        { status: 400 }
-      );
-    }
-
-    const companyId = userCompany.companyId;
-    const roles = await getUserRoles(userCookie.value, companyId);
-
-    const { id } = await params;
     const body = await request.json();
     const status = String(body.status || "");
 
@@ -55,9 +40,38 @@ export async function PATCH(request: Request, { params }: RouteProps) {
       );
     }
 
+    const userCompany = await prisma.userCompany.findFirst({
+      where: {
+        userId: userCookie.value,
+        isActive: true,
+      },
+      include: {
+        roles: {
+          include: {
+            role: true,
+          },
+        },
+      },
+    });
+
+    if (!userCompany) {
+      return NextResponse.json(
+        { message: "Aucune entreprise active." },
+        { status: 400 }
+      );
+    }
+
+    const companyId = userCompany.companyId;
+
+    const roles = userCompany.roles.map((item) => item.role.code);
+
+    const canValidate = roles.some((role) =>
+      ["MANAGER", "HSE_MANAGER", "COMPANY_ADMIN", "SUPER_ADMIN"].includes(role)
+    );
+
     const action = await prisma.actionItem.findFirst({
       where: {
-        id,
+        id: params.id,
         companyId,
       },
     });
@@ -70,17 +84,14 @@ export async function PATCH(request: Request, { params }: RouteProps) {
     }
 
     const isResponsible = action.responsibleId === userCookie.value;
-    const canValidate = hasRole(roles, [
-      "MANAGER",
-      "HSE_MANAGER",
-      "COMPANY_ADMIN",
-      "SUPER_ADMIN",
-    ]);
 
     if (status === "IN_PROGRESS" || status === "DONE") {
       if (!isResponsible && !canValidate) {
         return NextResponse.json(
-          { message: "Seul le responsable ou un manager peut modifier cette action." },
+          {
+            message:
+              "Seul le responsable ou un manager peut modifier cette action.",
+          },
           { status: 403 }
         );
       }
@@ -89,7 +100,10 @@ export async function PATCH(request: Request, { params }: RouteProps) {
     if (status === "VALIDATED" || status === "CANCELLED") {
       if (!canValidate) {
         return NextResponse.json(
-          { message: "Accès refusé pour valider ou annuler cette action." },
+          {
+            message:
+              "Accès refusé pour valider ou annuler cette action.",
+          },
           { status: 403 }
         );
       }
